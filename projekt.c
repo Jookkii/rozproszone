@@ -20,10 +20,12 @@
 #define INSECTION 107
 #define LEAVESECTION 108
 
-int artysci = 3;
+int artysci = 4;
+
+int rank, n;
 
 pthread_t threadKom;
-bool doNothing = false;
+bool doNothing = true;
 bool findPosition = false;
 bool waitForPair = false;
 bool waitForAck = false;
@@ -71,6 +73,22 @@ int global_position = 0;
 static pthread_mutex_t cp_mutex = PTHREAD_MUTEX_INITIALIZER;
 int pozycja = 0;
 
+static pthread_mutex_t p_mutex = PTHREAD_MUTEX_INITIALIZER;
+int pos = -1;
+
+void setPos(int val){
+    pthread_mutex_lock(&cp_mutex);
+    pos = val;
+    pthread_mutex_unlock(&cp_mutex);
+}
+
+int getPos(){
+    pthread_mutex_lock(&cp_mutex);
+    int val = pos;
+    pthread_mutex_unlock(&cp_mutex);
+    return val;
+}
+
 
 void check_thread_support(int provided)
 {
@@ -96,7 +114,16 @@ void check_thread_support(int provided)
     }
 }
 
-
+int changeLamport(int val1, int val2){
+    pthread_mutex_lock(&req_lamport_mutex);
+    if(val1>val2){
+        lamport_clock = val1+1;
+    }
+    else{
+        lamport_clock = val2+1;
+    };
+    pthread_mutex_unlock(&req_lamport_mutex);
+}
 
 //CurrentPosition
 int getCurrentPosition(){
@@ -215,33 +242,47 @@ void *startKomWatek(void *ptr)
     while (true) {
         MPI_Recv( &pakiet, 3, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
         switch ( status.MPI_TAG ) {
-            case REQPOSITION:             
+            case REQPOSITION:       
                 IncrementGlobalPosition();
-                if(pakiet[1]< getLamportClock()){
+                if(pakiet[1]< getReqLamport()){
                     incrementCurrentPosition();
                 }
-                if(pakiet[1]>getLamportClock()){
-                    setLamportClock(pakiet[1]);
+                else if(pakiet[1] == getReqLamport() && pakiet[0] < rank ){
+                    incrementCurrentPosition();
                 }
-                incrementLamportClock();
-                //podnieś globalną pozycje
-                //podnieś wlasną pozycje
-                //wyślij
-
+                changeLamport(pakiet[1],getLamportClock());
+                msg[0] = rank;
+                msg[1] = getLamportClock();
                 MPI_Send(msg,3, MPI_INT, status.MPI_SOURCE, ACKPAIR, MPI_COMM_WORLD );
+                incrementLamportClock();
                 break;
             case ACKRESOURCES: 
                 break;
             case ACKPAIR: 
+                changeLamport(pakiet[1],getLamportClock());
                 incrementACK();
                 break;
-            case ACCEPTPAIR: 
+            case ACCEPTPAIR:
+                changeLamport(pakiet[1],getLamportClock());
+                setPara(pakiet[0]);
+                printf("got acceptPair\n");
                 break;
             case REQRESOURCES: 
                 break;
             case RELRESOURCES: 
                 break;
-            case BROADCASTPOSITION: 
+            case BROADCASTPOSITION:    
+                changeLamport(pakiet[2],getLamportClock());
+                if(getACK()==n){
+                    if(pakiet[1] == getPos()){
+                        //printf("nasza pozycja: %d,pozycja w wiadomosci: %d, nasze_id: %d, id_w_wiadomosci: %d \n", getPos(),pakiet[1],rank, pakiet[0]);
+                        msg[0] = rank;
+                        incrementLamportClock();
+                        msg[1] = getLamportClock();
+                        MPI_Send(msg,3,MPI_INT,pakiet[0],ACCEPTPAIR,MPI_COMM_WORLD);
+                        setPara(pakiet[0]);
+                    }
+                }
                 break;
             case INSECTION: 
                 break;
@@ -253,20 +294,25 @@ void *startKomWatek(void *ptr)
     }
 }
 
+
 int main(int argc, char **argv)
 {   
-    int n;
     bool artysta;
-    int rank,size;
+    int size;
     MPI_Status status;
     int provided;
+    printf("1\n");
     MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
-    
+    printf("2\n");
     check_thread_support(provided);
+    printf("3\n");
     srand(rank);
+    printf("4\n");
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    printf("size:%d", size);
+    printf("5\n");
+    printf("size:%d\n", size);
+    
     if(size<artysci){
         exit(-1);
     }
@@ -277,10 +323,9 @@ int main(int argc, char **argv)
     else{
         n = size-artysci;
     }
-    //pthread_create( &threadKom, NULL, startKomWatek , 0);
+    pthread_create( &threadKom, NULL, startKomWatek , 0);
 
     while(true){
-        printf("something");
         if(doNothing){
             int n = rand();
             n = n%10;
@@ -292,6 +337,7 @@ int main(int argc, char **argv)
             setRequest();
             int msg[3];
             msg[0] = rank;
+            incrementLamportClock();
             msg[1] = getReqLamport();
             msg[2] = 0;
             if(artysta){
@@ -305,16 +351,18 @@ int main(int argc, char **argv)
                 }
             }    
             findPosition = false;
-            waitForPair = true;
+            waitForAck = true;
         }
         if(waitForAck){
+            //printf("id:%d ack: %d\n", rank, getACK());
             if(getACK() == n){
                 waitForAck = false;
                 waitForPair = true;
                 int msg[3];
                 msg[0] = rank;
                 msg[1] = getCurrentPosition();
-                msg[2] = 0;
+                incrementLamportClock();
+                msg[2] = getLamportClock();
                 if(artysta){
                     for(int i = artysci; i < size; i++){
                         MPI_Send( msg,3, MPI_INT, i, BROADCASTPOSITION, MPI_COMM_WORLD );
@@ -324,12 +372,20 @@ int main(int argc, char **argv)
                     for(int i = 0; i < artysci; i++){
                         MPI_Send( msg,3, MPI_INT, i, BROADCASTPOSITION, MPI_COMM_WORLD );
                     }
-                }     
+                }
+                char c = 'g';
+                if(artysta){
+                    c = 'a';
+                    printf("%d:%c: koniec wysyłania - pozycja: %d\n", rank,c,getCurrentPosition());
+                }
+                //printf("%d:%c: koniec wysyłania - pozycja: %d\n", rank,c,getCurrentPosition());
+                setPos(getCurrentPosition());     
             }
         }
         if(waitForPair){
             if(getPara() >= 0){
-                getResources= true;
+                printf("coś doszło %d:%d\n", rank,getPara());
+                doNothing= true;
                 waitForPair = false;
             }
         }
